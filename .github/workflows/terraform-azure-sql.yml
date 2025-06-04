@@ -1,0 +1,155 @@
+name: Terraform Azure SQL Management
+
+on:
+  workflow_dispatch: # Allows manual triggering
+    inputs:
+      terraform_directory:
+        description: 'Directory of the Terraform code to run (e.g., examples)'
+        required: true
+        default: 'examples'
+
+env:
+  # These are placeholders. Replace with your actual backend configuration values.
+  # Consider using GitHub environments and secrets for these if they vary per environment.
+  TF_BACKEND_RESOURCE_GROUP_NAME: "your_backend_rg_name"
+  TF_BACKEND_STORAGE_ACCOUNT_NAME: "your_storage_account_name"
+  TF_BACKEND_CONTAINER_NAME: "your_container_name"
+  TF_BACKEND_KEY: "terraform.tfstate"
+
+  # Set the working directory from the workflow input
+  TF_WORKING_DIR: ${{ github.event.inputs.terraform_directory }}
+
+jobs:
+  plan:
+    name: 'Terraform Plan'
+    runs-on: ubuntu-latest
+    outputs:
+      # Output the exit code of the terraform plan step
+      tf_plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Azure CLI and login
+      uses: azure/login@v1
+      with:
+        creds: |
+          {
+            "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+            "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+            "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+            "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+          }
+
+    - name: Install sqlcmd
+      run: |
+        echo "Installing sqlcmd..."
+        # Dynamically get Ubuntu version for Microsoft repository
+        DIST_VERSION=$(lsb_release -rs)
+        curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        curl https://packages.microsoft.com/config/ubuntu/${DIST_VERSION}/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+        echo "Adding /opt/mssql-tools/bin to GITHUB_PATH"
+        echo "/opt/mssql-tools/bin" >> $GITHUB_PATH
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.6.5" # Or your desired version
+
+    - name: Terraform Init
+      id: init
+      run: |
+        terraform init -input=false \
+          -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP_NAME}" \
+          -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT_NAME}" \
+          -backend-config="container_name=${TF_BACKEND_CONTAINER_NAME}" \
+          -backend-config="key=${TF_BACKEND_KEY}"
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        # Secret for Azure Storage Account access key if used for Terraform backend authentication
+        ARM_ACCESS_KEY: ${{ secrets.TF_BACKEND_AZURE_ACCESS_KEY }}
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+      working-directory: ${{ env.TF_WORKING_DIR }}
+
+    - name: Terraform Plan
+      id: plan # id is crucial for accessing outputs.exitcode
+      run: terraform plan -input=false -no-color -out=tfplan -detailed-exitcode
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      continue-on-error: true # Allow workflow to continue to check exit code
+
+    - name: Upload Plan Artifact
+      # Upload plan if plan step itself didn't error (exitcode 1 from terraform is an error)
+      if: steps.plan.outputs.exitcode != 1
+      uses: actions/upload-artifact@v4
+      with:
+        name: tfplan-${{ github.run_id }} # Unique artifact name per workflow run
+        path: ${{ env.TF_WORKING_DIR }}/tfplan
+        retention-days: 7 # Optional: Keep artifact for 7 days
+
+  apply:
+    name: 'Terraform Apply'
+    runs-on: ubuntu-latest
+    needs: plan
+    # Only run if 'terraform plan' indicated changes (exit code 2)
+    if: needs.plan.outputs.tf_plan_exitcode == '2'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Azure CLI and login
+      uses: azure/login@v1
+      with:
+        creds: |
+          {
+            "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+            "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+            "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+            "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+          }
+
+    - name: Install sqlcmd
+      run: |
+        echo "Installing sqlcmd..."
+        DIST_VERSION=$(lsb_release -rs)
+        curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+        curl https://packages.microsoft.com/config/ubuntu/${DIST_VERSION}/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+        sudo apt-get update
+        sudo ACCEPT_EULA=Y apt-get install -y mssql-tools unixodbc-dev
+        echo "Adding /opt/mssql-tools/bin to GITHUB_PATH"
+        echo "/opt/mssql-tools/bin" >> $GITHUB_PATH
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.6.5" # Ensure consistent version
+
+    - name: Download Plan Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: tfplan-${{ github.run_id }}
+        # Download to the working directory so 'tfplan' is at the root of it
+        path: ${{ env.TF_WORKING_DIR }}
+
+    - name: Terraform Init for Apply
+      id: init_apply # Separate ID for this init step
+      run: |
+        terraform init -input=false \
+          -backend-config="resource_group_name=${TF_BACKEND_RESOURCE_GROUP_NAME}" \
+          -backend-config="storage_account_name=${TF_BACKEND_STORAGE_ACCOUNT_NAME}" \
+          -backend-config="container_name=${TF_BACKEND_CONTAINER_NAME}" \
+          -backend-config="key=${TF_BACKEND_KEY}"
+      working-directory: ${{ env.TF_WORKING_DIR }}
+      env:
+        ARM_ACCESS_KEY: ${{ secrets.TF_BACKEND_AZURE_ACCESS_KEY }}
+
+    - name: Terraform Apply
+      id: apply
+      run: terraform apply -input=false -no-color tfplan # tfplan is now in the working dir
+      working-directory: ${{ env.TF_WORKING_DIR }}
