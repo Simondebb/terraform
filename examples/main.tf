@@ -50,34 +50,46 @@ module "sql_users_roles_example" {
   admin_login         = var.example_admin_login
   admin_password      = var.example_admin_password
 
-  roles = ["db_datawriter_example", "db_datareader_example"]
+  custom_roles_to_create = ["application_team_member", "auditor_role"]
 
-  users = [
+  owner_users = [
     {
-      name     = "exampleuser01"
-      # Passwords should be strong and ideally managed via a secrets manager
-      password = "ExampleUserP@ssw0rd1"
-      roles    = ["db_datawriter_example", "db_datareader_example"]
+      name     = "maindbadmin01"
+      password = "SuperSecureOwnerP@ssw0rd!"
+      # This user will get db_owner
+    }
+  ]
+
+  regular_users = [
+    {
+      name     = "serviceaccount01"
+      password = "RegularUserP@ssw0rdAlpha"
+      roles    = ["application_team_member", "db_datareader"] # Assuming db_datareader is a built-in role
     },
     {
-      name     = "exampleuser02"
-      password = "ExampleUserP@ssw0rd2"
-      roles    = ["db_datareader_example"]
+      name     = "analyst01"
+      password = "RegularUserP@ssw0rdBeta"
+      roles    = ["auditor_role"]
     }
   ]
 }
 
-output "managed_user_names" {
-  description = "Usernames managed by the module."
-  value       = module.sql_users_roles_example.user_names
+output "example_owner_user_names" {
+  description = "Owner usernames managed by the module."
+  value       = module.sql_users_roles_example.owner_user_names
 }
 
-output "managed_role_names" {
-  description = "Roles managed by the module."
-  value       = module.sql_users_roles_example.role_names_managed
+output "example_regular_user_names" {
+  description = "Regular usernames managed by the module."
+  value       = module.sql_users_roles_example.regular_user_names
 }
 
-output "sql_server_fqdn_from_module" {
+output "example_custom_roles_created" {
+  description = "Custom roles created by the module."
+  value       = module.sql_users_roles_example.custom_roles_created
+}
+
+output "example_sql_server_fqdn_from_module" {
   description = "SQL Server FQDN from the module."
   value       = module.sql_users_roles_example.sql_server_fqdn
 }
